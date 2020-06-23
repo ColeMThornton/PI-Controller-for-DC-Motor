@@ -1,0 +1,1887 @@
+;**************************************************************************************
+;* Lab 5: DC MOTOR [includes LibV2.1]                                                 *
+;**************************************************************************************
+;* Summary:                                                                           *
+;*   -  Motor controller with open and closed loop capabilites. Live updates of V_ACT,*
+;*   Error and Effort. The mdisplay updates can be turned off as well.                *                                         
+;* Author: Cole Thornton                                                              *
+;*   Cal Poly University                                                              *
+;*   Fall 2019                                                                        *
+;*                                                                                    *
+;* Revision History:                                                                  *
+;*   - The project is finally done                                                    *
+;*                                                                                    *
+;* ToDo:                                                                              *
+;*                                                                                    *      
+;**************************************************************************************
+
+;/------------------------------------------------------------------------------------\
+;| Include all associated files                                                       |
+;\------------------------------------------------------------------------------------/
+; The following are external files to be included during assembly
+
+
+;/------------------------------------------------------------------------------------\
+;| External Definitions                                                               |
+;\------------------------------------------------------------------------------------/
+; All labels that are referenced by the linker need an external definition
+
+              XDEF  main
+
+;/------------------------------------------------------------------------------------\
+;| External References                                                                |
+;\------------------------------------------------------------------------------------/
+; All labels from other files must have an external reference
+
+              XREF  ENABLE_MOTOR, DISABLE_MOTOR
+              XREF  STARTUP_MOTOR, UPDATE_MOTOR, CURRENT_MOTOR
+              XREF  STARTUP_PWM, STARTUP_ATD0, STARTUP_ATD1
+              XREF  OUTDACA, OUTDACB
+              XREF  STARTUP_ENCODER, READ_ENCODER
+              XREF  INITLCD, SETADDR, GETADDR, CURSOR_ON, CURSOR_OFF, DISP_OFF
+              XREF  OUTCHAR, OUTCHAR_AT, OUTSTRING, OUTSTRING_AT
+              XREF  INITKEY, LKEY_FLG, GETCHAR
+              XREF  LCDTEMPLATE, UPDATELCD_L1, UPDATELCD_L2
+              XREF  LVREF_BUF, LVACT_BUF, LERR_BUF,LEFF_BUF, LKP_BUF, LKI_BUF
+              XREF  Entry, ISR_KEYPAD
+
+;/------------------------------------------------------------------------------------\
+;| Assembler Equates                                                                  |
+;\------------------------------------------------------------------------------------/
+; Constant values can be equated here
+
+CHAN0 EQU $01              ;set bit zero
+TIOS  EQU $0040            ;timer IC/OC select register   
+TCTL2 EQU $0049            ;timer control register         
+TFLG1 EQU $004E            ;timer time flag 1 register    
+TMSK1 EQU $004C            ;time mask 1 register           
+TSCR  EQU $0046            ;time system control register 1 
+TCNT  EQU $0044            ;address of time counter register
+TC0   EQU $0050            ;address of timer input capture/output compare
+
+
+;/------------------------------------------------------------------------------------\
+;| Variables in RAM                                                                   |
+;\------------------------------------------------------------------------------------/
+; The following variables are located in unpaged ram
+
+DEFAULT_RAM:  SECTION
+
+;Task variables
+M2state      DS.B 1    ;Used in Finite State of Mastermind                    
+KPstate      DS.B 1    ;Used in Finite State of Keypad
+LCDstate     DS.B 1    ;Used in Finite State of Display
+MOTORstate   DS.B 1    ;Used in Finite State of MOTOR            
+                                      
+KEY_BUF   DS.B 5       ;Acts as storage from Keypad 
+KEY_FLAG  DS.B 1       ;Denotes when a key has been grabbed LKEY_FLG
+BS_FLAG   DS.B 1       ;Super Flag that takes 3 passes through main to Backspace on LCD
+ECHO_FLAG DS.B 1       ;Boolean that denotes when a digit needs to be printed
+FIRSTCHAR DS.B 1       ;boolean that determines which character is being printed
+DDIG      DS.B 1       ;Boolean that denotes when a digit has been captured                   
+COUNT     DS.B 1       ;Determines how many digits can be entered 
+POINTER   DS.W 1       ;Locates the address of KEY_BUF for printing and conversion to decimal
+DPTR      DS.W 1       ;Points to an address found in FLASH storage 
+RESULT    DS.W 1       ;Used in conversion from ASCII and sets NINT
+NINT      DS.B 1      
+
+DTL       DS.B 1       ;Boolean that denotes when "TOPLINE" needs to be printed                            
+DWAVE     DS.B 1       ;Boolean that denotes when "WAVEFORM" message needs to be printed                    
+DNINT     DS.B 1       ;Boolean that denotes when NINT message needs to be printed 
+E_COUNT   DS.W 1       ;Counts down to time error message display
+                                             
+DENTER    DS.B 1       ;Boolean that determines whether or not enter can be pressed
+DTRIG     DS.B 1       ;Boolean that determines whether LCD can echo the digits
+DERROR    DS.B 1       ;Super Flag that determines which error message needs to be printed
+D_MESS    DS.B 1       ;Boolean that determines when a message is done printing
+WAVE      DS.B 1       ;Super Boolean to determine which wave ios being outputted
+VALUE     DS.W 1       ;Next input for the DAC
+TEMP      DS.B 1       ;Temporary storage that inputs into KEY_BUF 
+
+;Interrupt service routine
+RUN       DS.B 1       ;Boolean that determines if the motor is on or off
+A_STAR    DS.W 1       ;Value used to update motor speed
+INTERVAL  DC.W 1       ; Variable for storing number of clock
+NEWBTI    DS.B 1       ;Boolean that is true when a new BTI is ready
+CINT      DS.B 1       ;Number of interrupt remaining in the current BTI
+THETA_OLD DS.W 1       ;
+THETA_NEW DS.W 1       ;
+V_ACT     DS.W 1       ;Actual motor speed
+V_REF     DS.W 1       ;Current motor speed setting?
+ERROR     DS.W 1       ;Represents the Vact-Vref difference
+E_SUM     DS.W 1       ;sum of the error
+KP        DS.W 1       ;proportional gain "Kp"
+KI        DS.W 1       ;integral gain "Ki"
+KPP       DS.W 1       ;1024*kp, number entered from keypad
+KIP       DS.W 1       ;1024*ki, number entered from keypad
+L1_FLAG   DS.B 1       ;boolean used to update line 1 of display
+EFFORT    DS.W 1       ;Calculation of how much the motor is working
+
+;variables copied from mastermind
+D_T       DS.B 1       ;Boolean to determine whether V_REF, KI or KP are being inputted
+CL        DS.B 1       ;Boolean that determines whether the motor operates closed loop or open loop
+D_ON      DS.B 1       ;Boolean that determines if the screen updates or not
+
+;Message Flags
+DNVREF    DS.B 1       ;message flag for VREF
+DKP       DS.B 1       ;message flag for KP
+DKI       DS.B 1       ;message flag for KI
+DRUN      DS.B 1       ;message flag for RUN
+DCL       DS.B 1       ;message flag for CL
+DON       DS.B 1       ;message flag for D_ON
+DSTOP     DS.B 1       ;message flag for STOP
+DOL       DS.B 1       ;message flag for OL
+DOFF      DS.B 1       ;message flag for D_OFF
+
+DF        DS.B 1     ;Locks out F1 and F2 keys after one has been pressed  F1(+) F2(-)
+NUM       DS.B 1     ;Number of times the BIN to ASCII has looped
+A_COUNT   DS.B 1     ;Count for BIN to ASCII 
+NEGFLAG   DS.B 1     ;Negative Flag triggered by ASCII to BIN calculatoion
+UD_FLAG   DS.B 1     ;Update flag risen by Motor ISR and read in LCD
+DISPCOUNT DS.B 1     ;Display counter until next update flag is triggerd
+SP_FLAG   DS.B 1     ;Flag for updating prints not on LCD template
+RETURNADD DS.B 1     ;Storage of last LCD address to allow updates to not interfere
+DOFFON    DS.B 1     ;CLear after every end
+DONOFF    DS.B 1
+OVF_FLAG  DS.B 1     ;Overflow flag for ERROR to display 'OVF' on LCD
+;/------------------------------------------------------------------------------------\
+;|  Main Program Code                                                                 |
+;\------------------------------------------------------------------------------------/
+; Your code goes here
+
+MyCode:       SECTION
+
+main:
+     ;clear task variables
+
+     clr  M2state
+     clr  KPstate
+     clr  LCDstate
+     clr  MOTORstate
+     
+     ;clear intertask variables
+     clr COUNT
+     clr DPTR
+     clr FIRSTCHAR
+     clr BS_FLAG
+     clr ECHO_FLAG
+     clr DENTER
+     clr DERROR
+     clr DNVREF
+     clr DKP
+     clr DKI
+     clr DRUN
+     clr DCL
+     clr DON
+     clr DSTOP
+     clr DOL
+     clr DOFF
+     clr RUN
+     clr CL
+     clr D_ON
+     clr D_T
+     clr  NEWBTI
+     clr  CINT
+     clrw VALUE
+     clrw INTERVAL
+     clrw A_STAR
+     clrw THETA_NEW
+     clrw THETA_OLD
+     clrw V_ACT
+     clrw V_REF
+     clrw ERROR
+     clrw E_SUM
+     clrw KP
+     clrw KI
+     clrw KPP
+     clrw KIP
+     clr DF
+     clrw EFFORT
+     clr NUM
+     clr NEGFLAG
+     clr UD_FLAG
+     clr SP_FLAG
+     clr RETURNADD
+     clr DOFFON
+     clr DONOFF
+     
+     bgnd
+     jsr STARTUP_PWM
+     jsr ENABLE_MOTOR
+     jsr STARTUP_ENCODER
+
+; This section of code runs subroutine after subroutine, looping forever
+TOP: jsr MASTERMIND
+     jsr LCD 
+     jsr KEYPAD
+     jsr MOTOR
+     bra TOP
+     
+;---------------------------------------------------------------------------------------
+;--------------------------Mastermind--------------------------------------------------
+;---------------------------------------------------------------------------------------           ;use a jump table in the future
+; This subroutine handles all the complex logic between other subroutines 
+                                                  
+MASTERMIND: ldaa  M2state
+            lbeq  M2state0       ;Initialize 
+            deca
+            lbeq  M2state1       ;Wait for DISPLAY to finish state 
+            deca
+            lbeq  M2state2       ;Hub State
+            deca
+            lbeq  M2state3       ;Digit state
+            deca 
+            lbeq  M2state4       ;BackSpace state
+            deca 
+            lbeq  M2state5       ;Enter state
+            deca
+            lbeq  M2state6       ;Letters A-F
+            deca
+            lbeq  M2state7
+            deca
+            lbeq  M2state8
+            deca
+            lbeq  M2state9
+            deca
+            lbeq  M2stateA
+            deca
+            lbeq  M2stateB
+            rts
+                 
+M2state0:   jsr INITLCD          ;Initialize the LCD
+            jsr LCDTEMPLATE      ;Print the LCD template
+            jsr INITKEY          ;Initialize the Keypad
+            jsr STARTUP_PWM      ;Initialize PWM
+            jsr STARTUP_MOTOR    ;Initialize motor in disabled state
+            movb #$FF, DISPCOUNT ;Start display count at -1
+            movb #$01, D_ON      ;Have the display update
+            movb #$01, DON       ;Determine when these flags should be raised (first click or on startup)
+            movb #$01, DSTOP     ;Move bit into Stop message flag
+            movb #$01, CL        ;Start with closed loop
+            movb #$01, DCL       ;Move bit into CL message flag
+            movw #KEY_BUF,POINTER;Move address of KEY_BUF into POINTER
+            movb #$01, M2state   ;Move to state 1 of mastermind
+            rts
+            
+;--------------------------Mastermind State 1------------------------------------------
+
+M2state1:   tst DON             ;Test display flags for each display message
+            lbne exit_M2s1      ;return to main if any display flags are true 
+            tst DOL
+            lbne exit_M2s1
+            tst DSTOP
+            lbne exit_M2s1
+            ldy #LVREF_BUF       ;Place zeros of each of the buffers
+            movb #$20, 0,Y
+            movb #$30, 1,Y
+            movb #$20, 2,Y
+            movb #$20, 3,Y          
+            ldy #LVACT_BUF
+            movb #$20, 0,Y
+            movb #$20, 1,Y
+            movb #$20, 2,Y
+            movb #$30, 3,Y
+            ldy #LERR_BUF
+            movb #$20, 0,Y
+            movb #$20, 1,Y
+            movb #$20, 2,Y
+            movb #$30, 3,Y
+            ldy #LEFF_BUF
+            movb #$20, 0,Y
+            movb #$20, 1,Y
+            movb #$20, 2,Y
+            movb #$30, 3,Y         
+            ldy #LKP_BUF
+            movb #$30, 0,Y
+            movb #$20, 1,Y
+            movb #$20, 2,Y
+            movb #$20, 3,Y
+            movb #$20, 4,Y
+            ldy #LKI_BUF
+            movb #$30, 0,Y
+            movb #$20, 1,Y
+            movb #$20, 2,Y
+            movb #$20, 3,Y
+            movb #$20, 4,Y
+            jsr UPDATELCD_L1    ;Update the top line of the LCD
+            jsr UPDATELCD_L2    ;Update the bottom line of the LCD
+            movb #$02, M2state  ;If all flags are false move to state 2 of mastermind(hub)
+            rts
+
+exit_M2s1: clr KEY_FLAG 
+           rts           
+            
+;--------------------------Mastermind State 2: HUB-------------------------------------
+
+M2state2:  ldab TEMP              ;Load Accumulator B with TEMP
+           cmpb #$08              ;Compare Backspace
+           lbeq  exit2M2s4                
+           cmpb #$0A              ;Compare for Enter
+           lbeq  exit2M2s5                  
+           cmpb #$F1              ;Compare for F1
+           lbeq exit2M2F1         
+           cmpb #$F2              ;Compare for F2
+           lbeq exit2M2F2         
+           cmpb #$41              ;Compare for A
+           lbeq  exit2M2A        
+           cmpb #$42              ;Compare for B
+           lbeq  exit2M2B         
+           cmpb #$43              ;Compare for C, change Vref state 
+           lbeq  exit2M2C         
+           cmpb #$44              ;Compare for D
+           lbeq  exit2M2D         
+           cmpb #$45              ;Compare for E
+           lbeq  exit2M2E        
+           cmpb #$46              ;Compare for F
+           lbeq  exit2M2F         
+           cmpb #$30              ;Compare for less than 30 
+           blo  exit_bdig         ;Branch if lower,to bad digit exit         
+           cmpb #$39              ;Compare for higher than 39   
+           bhi  exit_bdig         ;Branch if higher to bad digit exit 
+           movb #$03, M2state     ;Digit is verified, therefore move to Digit State
+           movb #$01, DDIG        ;Move $01 into DDIG flag to make true
+           rts
+
+;bad digit, clear and return to hub
+exit_bdig: clr KEY_FLAG           ;Clear KEY_FLAG
+           clr TEMP               ;Clear key in TEMP
+           rts
+
+;move to B_SPACE state        
+exit2M2s4: movb #$04, M2state     ;Exit to M2state4, the Backspace state
+           movb #$01, BS_FLAG     ;Move $01 into BS_FLAG
+           rts  
+
+;move to D_ENTER state
+exit2M2s5: tst COUNT              ;Test if COUNT is more than 0
+           beq null_dig           ;Branch if COUNT = 0
+           movb #$01, DENTER
+           movb #$05, M2state     ;Move to Enter State
+           rts   
+
+;Have the prompt release an leave everything unchanged
+null_dig:  clrw RESULT            ;Clear Result
+           clr  TEMP
+           tst D_T             
+           lbeq exit_M2s2          ;If equal to zero, branch to hub exit
+           jsr LCDTEMPLATE
+           jsr UPDATELCD_L2
+           movb #$01, UD_FLAG      ;Move $03 to trigger NO_DIG_ER message in LCDstate ------REMOVE
+           movb #$01, SP_FLAG
+           clr D_T
+           clr KEY_FLAG           ;Clear KEY_FLAG 
+           lbra exit_M2s2          ;Always branch to hub exit
+
+ ;Dig3,BS4,Ent5,A6,B7,C8,D9,EA,FB,
+exit2M2A: ldaa D_T
+          cmpa #$02
+          beq  exit_M2s2
+          cmpa #$03
+          beq  exit_M2s2
+          movb #$06, M2state   ;Exit to change RUN/STOP
+          rts
+
+exit2M2B: movb #$07, M2state   ;Exit to change D_OFF/D_ON
+          rts
+
+exit2M2C: tst D_T              ;Exit to change Vref
+          bne exit_M2s2        ;Test if Input trigger has been set and exit if true
+          movb #$01, D_T       ;Move bit into input boolean
+          movb #$01, DNVREF    ;Move bit into V_REF message flag
+          movb #$08, M2state
+          rts
+          
+exit2M2D: tst D_T              ;Exit to change KP
+          bne exit_M2s2        ;Test if Input trigger has been set and exit if true
+          movb #$02, D_T       ;Move bit into input boolean
+          movb #$01, DKP       ;Move bit into KP message flag
+          movb #$09, M2state
+          rts 
+          
+exit2M2E: tst D_T              ;Exit to change KI                
+          bne exit_M2s2        ;Test if Input trigger has been set and exit if true
+          tst CL               ;Test if Open Loop
+          beq exit_M2s2
+          movb #$03, D_T       ;Move bit into input boolean
+          movb #$01, DKI       ;Move bit into KI message flag
+          movb #$0A, M2state  
+          rts
+
+exit2M2F: tst D_T              ;Exit to change CL
+          bne  exit_M2s2       ;Test if Input trigger has been set and exit if true
+          movb #$0B, M2state        
+          rts
+          
+exit2M2F1:tst DF               
+          bne exit_M2s2        ;Test if sign flag has been set and exit if true
+          movb #$03, M2state   ;Move to Digit state.
+          rts                  
+
+exit2M2F2:tst DF
+          bne exit_M2s2        ;Test if sign flag has been set and exit if true
+          movb #$03, M2state   ;Move to Digit State
+          rts
+          
+exit_M2s2: movb #$02, M2state  ;Move to M2state2 
+           clr TEMP
+           clr KEY_FLAG
+           rts
+
+      
+;-----------------------Mastermind State 3: DIGITS-------------------------------------  
+
+M2state3:  clr KEY_FLAG      ;Clear KEY_FLAG
+           tst DNVREF        ;Test if  is done printing         
+           lbne exit_M2s3
+           tst DKP           ;test if KP message flag is done printing
+           lbne exit_M2s3
+           tst DKI           ;test if KI message flag is done printing
+           lbne exit_M2s3
+           tst DDIG          ;Test if DDIG is true 
+           ldaa D_T          ;Load A with trigger boolean and compare for digit
+           cmpa #$01     
+           beq exit_Vdigits
+           cmpa #$02
+           lbeq exit_Pdigits   ; Can most likely condense KI and KP exits to one exit
+           cmpa #$03
+           lbeq exit_Idigits
+           lbra exit_M2s3
+           
+
+exit_Vdigits: ldaa TEMP
+              cmpa #$F1              ;Test if positive pressed
+              beq  possign
+              cmpa #$F2              ;Test if negative was pressed
+              beq  negsign
+              lbra cont_eVdig
+              
+possign:      tst DF                 ;Test DF for sign
+              lbne exit_M2s3
+              movb #$01, DF          ;Move bit into DF boolean
+              tst COUNT              ;test if count is less than 1
+              lbne exit_M2s3
+              movb #$01, ECHO_FLAG   ;Trigger ECHO_FLAG to display sign
+              inc COUNT              ;Increment COUNT
+              ldx POINTER            ;Load X with POINTER
+              movb #$2B,0,X          ;Place plus sign in KEY_BUF
+              incw POINTER           ;Increment POINTER
+              lbra exit_M2s3
+
+negsign:      tst DF                ;Test DF for sign
+              lbne exit_M2s3
+              movb #$02, DF         ;Move bit into DF boolean
+              tst COUNT             ;test if count is less than 1
+              lbne exit_M2s3
+              movb #$01, ECHO_FLAG  ;Trigger ECHO_FLAG to display sign
+              inc COUNT             ;Increment COUNT
+              ldx POINTER           ;Load X with POINTER
+              movb #$2D,0,X         ;Place minus sign in KEY_BUF
+              incw POINTER          ;Increment POINTER
+              lbra exit_M2s3
+
+cont_eVdig    tst DF                 ;Test DF if a sign has been pressed
+              beq exitVREF3
+              ldaa #$04              ;Load A with 4 if a sign was pressed
+              bra COMPARE
+exitVREF3:    ldaa #$03              ;Load Acculumator A with $03
+COMPARE:      cmpa COUNT             ;Compare COUNT to see if it is at 3
+              lbeq  final_digit       
+              inc  COUNT             ;Increment COUNT if less than 3
+              movb #$01, ECHO_FLAG   ;Move $01 into ECHO_FLAG     
+              ldx  POINTER           ;Load Register X with POINTER
+              movb TEMP,0,X          ;Move what is in TEMP into address POINTER is at offset by 0
+              clr  TEMP              ;Clear TEMP after moving byte
+              incw POINTER           ;Increment POINTER into new address of KEY_BUF
+              movb #$02, M2state     ;Move $02 into M2state to return to hub state
+              clr DDIG               ;Clear DDIG
+              rts
+
+exit_Pdigits: ldab TEMP              ;Load TEMP into B
+              cmpb #$F1              ;Compare to F1 key
+              beq NOSIGNS            
+              cmpb #$F2              ;Compare to F2 key
+              beq NOSIGNS
+              ldaa #$05              ;Load Acculumator A with $03
+              cmpa COUNT             ;Compare COUNT to see if it is at 3
+              beq  final_digit       
+              inc  COUNT             ;Increment COUNT if less than 3
+              movb #$01, ECHO_FLAG   ;Move $01 into ECHO_FLAG     
+              ldx  POINTER           ;Load Register X with POINTER
+              movb TEMP,0,X          ;Move what is in TEMP into address POINTER is at offset by 0
+              clr  TEMP              ;Clear TEMP after moving byte
+              incw POINTER           ;Increment POINTER into new address of KEY_BUF
+              movb #$02, M2state     ;Move $02 into M2state to return to hub state
+              clr DDIG               ;Clear DDIG
+              rts
+
+exit_Idigits:  ldab TEMP             ;Load TEMP into B
+               cmpb #$F1             ;Compare to F1 key
+               beq NOSIGNS
+               cmpb #$F2             ;Compare to F2 key
+               beq NOSIGNS
+               ldaa #$05             ;Load Acculumator A with $03
+               cmpa COUNT            ;Compare COUNT to see if it is at 3
+               beq  final_digit      
+               inc  COUNT            ;Increment COUNT if less than 3
+               movb #$01, ECHO_FLAG  ;Move $01 into ECHO_FLAG     
+               ldx  POINTER          ;Load Register X with POINTER
+               movb TEMP,0,X         ;Move what is in TEMP into address POINTER is at offset by 0
+               clr  TEMP             ;Clear TEMP after moving byte
+               incw POINTER          ;Increment POINTER into new address of KEY_BUF
+               movb #$02, M2state    ;Move $02 into M2state to return to hub state
+               clr DDIG              ;Clear DDIG
+               rts
+            
+final_digit: movb #$02, M2state   ;Move $02 into M2state to return to hub state
+             clr ECHO_FLAG        ;CLear ECHO_FLAG
+             clr DDIG             ;Clear DDIG flag
+             clr TEMP
+             rts
+
+exit_M2s3: movb #$02, M2state     ;Move $02 into M2state to return to hub state
+           clr TEMP
+           clr DDIG               ;Clear DDIG flag
+           rts
+
+NOSIGNS: movb #$02, M2state
+         clr TEMP
+         clr DDIG
+         rts
+
+          
+;-----------------------Mastermind State 4: BACKSPACE---------------------------------- 
+                                                                                        
+M2state4:  clr TEMP            ;Clear key held in TEMP
+           clr KEY_FLAG             
+           tst D_T             ;Test to see if values are being changed with the keypad
+           beq exit_M2s4            
+           tst BS_FLAG         ;Test BS_FLAG
+           beq exit_M2s4       ;If equal to zero, branch to exit 
+           ldaa COUNT
+           cmpa #$01
+           beq resetSIGN            
+           rts
+
+resetSIGN: clr DF              ;Clear sign flag
+           tst BS_FLAG         ;Test BS flag if equal to zero
+           beq exit_M2s4
+           
+exit_M2s4: movb #02, M2state   ;Move $02 into M2state to trigger M2state2
+           rts        
+
+           
+;-----------------------Mastermind State 5: ENTER-------------------------------------- 
+
+M2state5:  clr  TEMP                ;Clear Key in TEMP
+           tst  DENTER              ;Test if DENTER can be pressed 
+           lbeq exit_M2s5
+           clr  DENTER              ;Clear DENTER flag
+           movb COUNT, A_COUNT 
+           jsr  BUFF                ;Subroutine to convert ASCII to BIN       
+           ldaa D_T                 ;Load D_T for Input Check 
+           cmpa #$01
+           lbeq  enter_VREF         ;Exit if VREF is the input
+           cmpa #$02
+           lbeq  enter_KP           ;Exit if KP is the input
+           cmpa #$03
+           lbeq  enter_KI           ;Exit if KI is the input
+           lbra exit_M2s5
+
+
+enter_VREF: clra
+            ldy #LVREF_BUF        ;Load Y with the address of LVREF_BUF
+            movb #$20, 0,Y        ;Place spacees in each of the storage
+            movb #$20, 1,Y
+            movb #$20, 2,Y
+            movb #$20, 3,Y
+            tst NEGFLAG            ;Test if ASCII to Binary conversion holds a negative value
+            lbne NEGMULT          
+            clr D_T                ;Clear D_T
+            ldd RESULT             ;Load D with value of RESULT
+            std V_REF              ;Store value in RESULT into VREF
+            clr NUM                ;Clear Number counter for BIN to ASCII
+            tst DF                 ;Test sign flag for zero
+            beq FPOS       
+            movw #LVREF_BUF, POINTER ;Move address of LVREF_BUF into POINTER 
+            ldy POINTER              ;Load Y with POINTER   
+            dec A_COUNT
+            jsr BINASC               ;Subroutine BIN to ASCII
+            movw #KEY_BUF, POINTER   ;Move first address of KEY_BUF into POINTER 
+            clr A_COUNT              ;Clear A_COUNT from BIN to ASCII
+            clr KEY_FLAG             ;Clear KEY_FLAG                              
+            ldaa #$30                ;Set new address to outside the LCD screen view
+            staa RETURNADD           ;Store address to preven update mishap
+            jsr SETADDR
+            ldd V_REF                ;Load D with V_REF value to update motor
+            jsr UPDATE_MOTOR
+            clr DF                   ;Clear sign flag
+            movb #$02, M2state       ;Move to Mastermind Hub
+            jsr LCDTEMPLATE          ;Reprint the entire LCD template
+            jsr UPDATELCD_L1         ;Update Line 1 after entering
+            jsr UPDATELCD_L2         ;Update Line 2 after entering
+            clr DONOFF               ;Clear Display transition flag ON-OFF
+            clr DOFFON               ;Clear Display transition flag OFF-ON
+            movb #$01,SP_FLAG        ;Trigger Small print flag
+            rts
+
+FPOS:        movw #LVREF_BUF, POINTER ;Move address of LVREF_BUF into POINTER 
+             ldy POINTER              ;Load Y with POINTER   
+             jsr BINASC               ;Subroutine BIN to ASCII
+             movw #KEY_BUF, POINTER   ;Move first address of KEY_BUF into POINTER 
+             clr A_COUNT              ;Clear A_COUNT from BIN to ASCII
+             clr KEY_FLAG             ;Clear KEY_FLAG
+             ldaa #$30                ;Set new address to outside the LCD screen view
+             staa RETURNADD           ;Store address to preven update mishap
+             jsr SETADDR
+             ldd V_REF                ;Load D with V_REF value to update motor
+             jsr UPDATE_MOTOR
+             clr DF                   ;Clear sign flag
+             movb #$02, M2state       ;Move to Mastermind Hub
+             jsr LCDTEMPLATE          ;Reprint the entire LCD template
+             jsr UPDATELCD_L1         ;Update Line 1 after entering
+             jsr UPDATELCD_L2         ;Update Line 2 after entering
+             clr DONOFF               ;Clear Display transition flag ON-OFF
+             clr DOFFON               ;Clear Display transition flag OFF-ON
+             movb #$01,SP_FLAG        ;Trigger Small print flag
+             rts
+
+NEGMULT:     clr NEGFLAG
+             movw RESULT, V_REF       ;Move RESULT into V_REF
+             ldy #$FFFF               ;Multiply by negative 1 
+             emuls                     
+             std V_REF                ;Store D into V_REF
+             clr D_T                  ;Clear D_T
+             clr NUM
+             movw #LVREF_BUF, POINTER ;Move address of LVREF_BUF into POINTER 
+             ldy POINTER              ;Load Y with POINTER  
+             dec A_COUNT 
+             jsr BINASC               ;Subroutine BIN to ASCII
+             movw #KEY_BUF, POINTER   ;Move first address of KEY_BUF into POINTER 
+             clr A_COUNT              ;Clear A_COUNT from BIN to ASCII
+             clr KEY_FLAG             ;Clear KEY_FLAG
+             ldaa #$30                ;Set new address to outside the LCD screen view
+             staa RETURNADD           ;Store address to preven update mishap
+             jsr SETADDR
+             ldd V_REF                ;Load D with V_REF value to update motor
+             jsr UPDATE_MOTOR
+             clr DF                   ;Clear sign flag
+             movb #$02, M2state       ;Move to Mastermind HUb
+             jsr LCDTEMPLATE
+             jsr UPDATELCD_L1         ;Update Line 1 after entering
+             jsr UPDATELCD_L2         ;Update Line 2 after entering
+             clr DONOFF               ;Clear Display transition flag ON-OFF
+             clr DOFFON               ;Clear Display transition flag OFF-ON
+             movb #$01,SP_FLAG        ;Trigger small prints flag
+             rts
+                       
+enter_KI:    tst CL                 ;test for Open Loop
+             lbeq exit_M2s5
+             clra                   ;Clear A
+             clr COUNT              ;Clear COUNT
+             clr D_T                ;Clear D_T for next input
+             ldd RESULT             ;Load RESULT into D
+             cpd #$7FFF             ;Compare result to 32767
+             bhs enter_KI_SAT       ;If higher, branch to saturation
+             std KIP                ;Store D into KIP
+             bra enter_KI_EXIT      ;Branch to final exit
+             
+enter_KI_SAT:ldd #$7FFF             ;Load D with 32767 for saturation
+             std KIP                ;Store D into KPP
+                
+enter_KI_EXIT:
+             clr NUM                ;Clear number counter for BIN to ASCII
+             ldy #LKI_BUF           ;Load Y with address of LKI_BUF
+             movb #$20, 0,Y         ;Place spaces in all of the storage
+             movb #$20, 1,Y
+             movb #$20, 2,Y
+             movb #$20, 3,Y
+             movb #$20, 4,Y
+             movw #LKI_BUF, POINTER ;Load address of LKI_BUF into POINTER
+             ldy  POINTER           ;Load Y with POINTER
+             dec  A_COUNT           ;Decrement A_COUNT before BIN to ASCII convert
+             jsr  BINASC2           ;Subroutine BIN to ASCII for KI and KP
+             clr  A_COUNT           ;Clear A_COUNT
+             movw #KEY_BUF, POINTER ;Move first address of KEY_BUF into POINTER
+             clr  KEY_FLAG          ;Clear KEY_FLAG
+             jsr UPDATELCD_L2       ;Update bottom line of LCD
+             ldaa #$30              ;Set new address to outside the LCD screen view
+             staa RETURNADD         ;Store A for future reference
+             jsr  SETADDR
+             movb #$02, M2state     ;Return to Mastermind hub state
+             rts
+             
+enter_KP:    clra
+             clr COUNT            ;clear COUNT
+             clr D_T              ;Clear D_T for next input
+             ldd RESULT           ;Load D with RESULT
+             cpd #$7FFF           ;Compare D with 32767
+             bhs enter_KP_SAT     ;If higher, branch to saturation
+             std KPP              ;Store KPP
+             bra enter_KP_EXIT    ;branch to final exit
+             
+enter_KP_SAT:ldd #$7FFF           ;Load D with 32767 for saturation
+             std KPP              ;Store D into KPP
+                       
+enter_KP_EXIT:
+             clr NUM               ;Clear number counter for BIN to ASCII
+             ldy #LKP_BUF          ;Load Y with address of LKP_BUF
+             movb #$20, 0,Y        ;Place spaces in each of the storage
+             movb #$20, 1,Y
+             movb #$20, 2,Y
+             movb #$20, 3,Y
+             movb #$20, 4,Y      
+             movw #LKP_BUF, POINTER ;Move the address of LKP_BUF into POINTER  
+             dec A_COUNT            ;Decrement A_COUNT before BIN to ASCII convert
+             ldy POINTER            ;Load Y with POINTER
+             jsr BINASC2            ;Subroutine BIN to ASCII for KI and K
+             clr A_COUNT            ;Clear A_COUNT
+             movw #KEY_BUF, POINTER ;Move first address of KEY_BUF into POINTER
+             clr KEY_FLAG           ;Clear KEY_FLAG
+             jsr UPDATELCD_L2       ;Update bottom line of LCD
+             ldaa #$30              ;Set new address to outside the LCD screen view
+             staa RETURNADD         ;Store address to prevent update mishap
+             jsr SETADDR
+             movb #$02, M2state     ;Return to Hub state
+             rts
+             
+exit_M2s5: movb #$02, M2state       ;Move into state 2 of Mastermind
+           clr KEY_FLAG
+           rts
+
+;-----------------------Mastermind State 6: A-------------------------------------
+
+M2state6: clr TEMP                  ;Clear TEMP storage
+          jsr  READ_ENCODER         ;Read motor encoder
+          std  THETA_OLD            ;Store 1st reading as THETA_OLD
+          ldab RUN                  ;Test if RUN is toggled
+          cmpb #$00
+          beq  STPtoRUN             ;If flase, branch to switch from STOP to RUN
+          cmpb #$01
+          beq  RUNtoSTP             ;If true, branch to switch from RUN to STOP
+          
+          rts 
+          
+STPtoRUN: movb #$01, RUN            ;Move bit into RUN boolean
+          movb #$01, DRUN           ;Move bit into Run message flag
+          clrw E_SUM                ;Clear previous Error sum
+          jsr ENABLE_MOTOR          ;Enable the motor to run
+          ldd V_REF                 ;Load V_REF in order to update motor
+          jsr UPDATE_MOTOR        
+          movb #$02,M2state         ;return to Hub state fo mastermind
+          rts
+          
+RUNtoSTP: clr RUN                   ;Clear the bits in RUN boolean
+          movb #$01, DSTOP          ;Move bit into STOP message flag
+          jsr DISABLE_MOTOR         ;Disable motor
+          jsr STARTUP_PWM           ;Start up the pulse with modulation
+          jsr STARTUP_MOTOR         ;Start up the motor
+          movb #$02,M2state         ;Return to hub 
+          rts
+          
+;-----------------------Mastermind State 7: B-------------------------------------
+
+M2state7: clr TEMP                  
+          ldab D_ON                 ;Load B with D_ON boolenan
+          cmpb #$00
+          beq  DOFFtoDON            ;If false, branch to turn on
+          cmpb #$01
+          beq  DONtoDOFF            ;If true, branch to turn off
+          rts
+          
+ DOFFtoDON:movb #$01, DOFFON        ;Move bit into transition flag OFF-ON
+           clr DONOFF               ;Clear transition flag ON-OFF
+           movb #$01, D_ON          ;Move bit into D_ON boolean
+           movb #$01, DON           ;Move bit into D_ON message flag
+           movb #$02,M2state        ;Return to hub state
+           rts  
+           
+DONtoDOFF: movb #$01, DONOFF        ;Move bit into transition flag ON-OFF
+           clr DOFFON               ;Clear transition flag OFF-ON
+           clr D_ON                 ;Clear D_ON boolean to turn off display
+           movb #$01, DOFF          ;Trigger D_OFF message flag
+           movb #$02,M2state        ;Return to hub state
+           rts
+ 
+;-----------------------Mastermind State 8:   C      -------------------------------------
+
+M2state8: clr TEMP
+          tst DNVREF               ;test DNVREF message flag     
+          bne exit_M2s8
+          rts
+
+exit_M2s8:movb #$02,M2state        ;Return to hub state
+          rts
+
+;-----------------------Mastermind State 9:    D      -------------------------------------
+                    ;KP state
+M2state9: clr TEMP
+          ldaa D_T                   ;Load input trigger flag
+          cmpa #$02
+          bne exit_M2s9              ;if incorrect trigger then exit 
+          
+          clr RUN                    ; Possible to keep in this state with D_T?
+          movb #$01, DSTOP           ;Trigger STOP message flag
+          movb #$01, DKP             ;Trigger KP message flag
+          movb #$01, SP_FLAG         ;Trigger Small prints message flag
+          movw #KEY_BUF, POINTER     ;Move address of KEY_BUF into POINTER
+          jsr DISABLE_MOTOR          ;Disable motor
+          movb #$02, M2state         ;Return to hub state
+          rts
+     
+ exit_M2s9: movb #$02, M2state       ;Return to hub state
+            rts
+ 
+            
+;-----------------------Mastermind State A:     E     -------------------------------------
+                       ;KI state
+M2stateA: clr TEMP                 ;Clear storage in TEMP
+          ldaa D_T                 ;Load A with input trigger flag
+          cmpa #$03                ;Compare input boolean with $03
+          bne exit_M2sA            
+          tst CL                   ;Test if OL is activated
+          beq exit_OLBlock
+          clr RUN                  ;Clear Run
+          jsr DISABLE_MOTOR        ;Disable motor
+          movw #KEY_BUF, POINTER   ;Move KEY_BUF address into POINTER
+          movb #$01, DKI           ;Move bit inot DKI message flag
+          movb #$01, SP_FLAG       ;Move bit into small print message flag
+          movb #$02, M2state
+          rts
+          
+exit_OLBlock: clr D_T              ;Clear input trigger boolean
+              movb #$02, M2state   ;Return to Mastermind Hub
+              rts
+              
+exit_M2sA: movb #02, M2state       ;Return to Mastermind Hub
+           rts
+
+;-----------------------Mastermind State B:     F      -------------------------------------
+
+M2stateB: clr TEMP                  ;possible to consolidate
+          ldab CL               ;Load B with CL boolean
+          cmpb #$00
+          beq  OLtoCL           ;If false, move to turn on CL
+          cmpb #$01
+          beq  CLtoOL           ;If true, move to turn on OL
+          rts
+                                ;Write to this code turning KP to zero
+OLtoCL:   movb #$01, CL         ;Fix to take it out of closed loop[
+          movb #$01, DCL        ;Allow CL message to be printed 
+          movb #$02,M2state
+          rts 
+
+CLtoOL:   clr CL                ;Clear CL 
+          clrw KIP              ;Clear contents KIP
+          ldy #LKI_BUF          ;Load Y with the address fo LKI_BUF
+          movb #$30, 0,Y        ;Place a zero in the first storage then add spaces to the rest
+          movb #$20, 1,Y
+          movb #$20, 2,Y
+          movb #$20, 3,Y
+          movb #$20, 4,Y
+          movb #$01, UD_FLAG    ;trigger the update flag
+          jsr UPDATELCD_L2       ;Update the second line of the LCD
+          movb #$01, DOL
+          movb #$02, M2state
+          rts
+
+;---------------------------------------------------------------------------------------           
+;----------------------------DISPLAY----------------------------------------------------
+;---------------------------------------------------------------------------------------
+; This subroutine is responsible for the LCD display output
+
+LCD:    ldaa  LCDstate
+        lbeq  LCDstate0
+        deca
+        lbeq  LCDstate1    ;LCD Hub State
+        deca
+        lbeq  LCDstate2    ;ECHO
+        deca
+        lbeq  LCDstate3    ;Backspace
+        rts
+       
+LCDstate0: movb #$01, FIRSTCHAR     ;Move bit to initialize FIRSTCHAR
+           movb #$01, LCDstate      ;Move to LCDstate1
+           rts 
+           
+;-----------------------Display State 1: HUB-------------------------------------------  ***SHOULD BE 
+                                  ;LCD Hub State                                         ;DONE
+LCDstate1:  tst  BS_FLAG          ;Test if BS_FLAG is greater than 0
+            bne  BS_exit
+            tst  ECHO_FLAG        ;Test if a DIGIT is waiting to be printed
+            bne  ECHO_exit
+            tst  UD_FLAG          ;Test if UPDATE is required
+            bne  UPDATE_exit
+            tst SP_FLAG           ;Test if Small print flag has been set
+            lbne SMALLPRINT
+            lbra  CONTINUE
+            rts
+                                                          
+BS_exit:    movb #$03, LCDstate    ;Move to LCDstate3, (Backspace)
+            rts
+            
+ECHO_exit:  movb #$02, LCDstate    ;Move to LCDstate2 (ECHO)
+            rts           
+                                   
+UPDATE_exit:tst D_ON               ;Test D_ON for updating the LCD
+            lbeq SMALLPRINT        ;If false, branch to Small Prints
+            tst UD_FLAG            ;Tests update flag
+            bne LCDUPDATE          ;If true, branch to update entire LCD
+            tst SP_FLAG            ;Test Small Print Flag
+            lbne SMALLPRINT         ;If true, branch to Small prints
+            lbra CONTINUE          ;Always branch to message flag checks                    
+            rts
+            
+LCDUPDATE:
+           ldd V_ACT               ;Load V_ACT to D
+           ldy #LVACT_BUF          ;Load the address of LVACT_BUF to Y
+           movb #$20, 0,Y          ;Add spaces to all of the storage in the buffer
+           movb #$20, 1,Y
+           movb #$20, 2,Y
+           movb #$20, 3,Y
+           movb #$03, A_COUNT      ;allow A_COUNT to have 3 for buffer input in conversion
+           jsr BINASC              ;Binary to ASCII conmversion
+           clr A_COUNT             ;Clear A_COUNT
+           
+           tst OVF_FLAG            ;tests if error has risen above or below 999 or -999 respectively
+           bne OVF_ERR             
+           ldd ERROR               ;Load ERROR into D
+           ldy #LERR_BUF           ;Load the address of LERR_BUF to Y
+           movb #$20, 0,Y          ;Add spaces to all of the storage in the buffer
+           movb #$20, 1,Y
+           movb #$20, 2,Y
+           movb #$20, 3,Y
+           movb #$03, A_COUNT      ;allow A_COUNT to have 3 for buffer input in conversion
+           jsr BINASC              ;Binary to ASCII conversion
+           clr A_COUNT             ;Clear A_COUNT
+           bra CONTUD
+ 
+OVF_ERR:  
+           ldy #LERR_BUF           ;Load the address of LERR_BUF to Y
+           movb #$20, 0,Y          ;Add spaces to first storage
+           movb #$4F, 1,Y          ;ASCII O
+           movb #$56, 2,Y          ;ASCII V
+           movb #$46, 3,Y          ;ASCII F
+  
+           
+CONTUD:    ldd EFFORT              ;Load ERROR into D
+           ldy #LEFF_BUF           ;Load the address of LEFF_BUF to Y
+           movb #$20, 0,Y          ;Add spaces to all of the storage in the buffer
+           movb #$20, 1,Y
+           movb #$20, 2,Y
+           movb #$20, 3,Y
+           movb #$03, A_COUNT      ;allow A_COUNT to have 3 for buffer input in conversion
+           jsr BINASC              ;Binary to ASCII conversion
+           clr A_COUNT             ;Clear A_COUNT after completion
+
+           jsr UPDATELCD_L1        ;Update the top line of the LCD
+           ldaa RETURNADD          ;After update, load address held by one of the inputs pressed
+           jsr SETADDR             ;Set the address
+           clr OVF_FLAG
+           clr UD_FLAG             ;Clear update flag
+           tst SP_FLAG             ;Test Small prints flag
+           bne SMALLPRINT          ;If true, branch to small print checks
+           bra CONTINUE
+SMALLPRINT:           
+             ldab RUN          ;Load B with Run
+             cmpb #$00         ;Compare to see if false
+             beq  flag_STP     ;If false, signal STOP flag trigger
+             bne  flag_RUN     ;If true, signal RUN flag trigger
+             rts
+                    
+flag_STP: movb #$01, DSTOP     ;Allow STOP message print
+          ldab CL              ;Load B with CL
+          cmpb #$00            ;Compare to see if false
+          beq  flag_OL         ;If false, signal OL flag trigger
+          bne  flag_CL         ;If true,, signal CL flag trigger
+        
+
+flag_RUN: movb #$01, DRUN      ;Allow RUN message print
+          ldab CL              ;Load B with CL
+          cmpb #$00            ;Compare to see if false
+          beq  flag_OL         ;If false, signal OL flag trigger
+          bne  flag_CL         ;If true,, signal CL flag trigger
+        
+
+flag_CL: movb #$01, DCL        ;Allow CL message print
+         ldab D_ON             ;Load B with D_ON
+         cmpb #$00             ;Compare to see if false
+         beq  flag_DOFF        ;If false, signal D_OFF flag trigger
+         bne  flag_DON         ;If true, signal D_ON flag trigger
+ 
+         
+flag_OL: movb #$01, DOL        ;Allow OL message print
+         ldab D_ON             ;Load B with D_ON
+         cmpb #$00             ;Compare to see if false
+         beq  flag_DOFF        ;If false, signal D_OFF flag trigger
+         bne  flag_DON         ;If true, signal D_ON flag trigger
+        
+
+flag_DON: movb #$01, DON       ;Allow D_ON message print
+          clr SP_FLAG
+          bra CONTINUE
+
+flag_DOFF:movb #$01, DOFF      ;Allow D_OFF message to print
+          clr SP_FLAG
+          jsr GETADDR          ;Get address from LCD
+          staa RETURNADD       ;Store LCD address in A to RETURNADD
+          bra CONTINUE
+  
+ 
+CONTINUE:   
+            tst  DNVREF           ;Test DNVREF if true
+            lbne pVREF
+            tst  DKP              ;Test DKP if true
+            lbne pKP
+            tst  DKI              ;Test DKI if true
+            lbne pKI
+            tst  DRUN             ;Test DRUN if true
+            lbne pRUN
+            tst  DSTOP            ;Test DSTOP if true
+            lbne pSTOP 
+            tst  DCL              ;Test DCL if true
+            lbne pCL
+            tst  DOL              ;Test DOL if true
+            lbne pOL
+            tst  DON              ;Test DON if true
+            lbne pD_ON
+            tst  DOFF             ;Test DOFF if true
+            lbne pD_OFF
+            rts         
+            
+;--------------------------------NEW V_REF MESSAGE------------------------------------
+pVREF:  tst COUNT              
+        bne exit_pVREF
+        tst FIRSTCHAR          ;Test if FIRSTCHAR is zero
+        bne e_VREF             ;If not equal to zero, branch to label for putchar_1st 3
+        jsr putchar            ;If equal to zero, place next character
+        ldab FIRSTCHAR         ;Load Accumulator B with FIRSTCHAR
+        cmpb DNVREF            ;Compare DNVREF to FIRSTCHAR
+        beq e_FVREF            ;If both equal 1, branch to clr DNVREF
+        rts  
+        
+exit_pVREF: rts
+
+e_VREF: movw #NEW_VREF,DPTR    ;Move address of NEW_VREF message into DPTR
+        ldx DPTR               ;Load Register X with DPTR
+        ldaa #$40              ;Load Accumulator A with Address of first LCD
+        jsr putchar_1st        ;Place the first character
+        rts
+
+e_FVREF: clr DNVREF             ;Clear DNVREF flag to stop printing message
+         clr COUNT              ;Clear COUNT when done printing
+         clrw DPTR              ;Clear DPTR for new address to be loaded
+         tst D_T                ;Test D_T to see if a wave has been loaded
+         beq exit_FVREF
+         ldaa #$4A
+         staa RETURNADD
+         jsr SETADDR
+         jsr CURSOR_ON         ;Make the cursor visible
+         rts  
+
+exit_FVREF: clr DNVREF         ;Clear the DNVREF flag
+            ldaa #$30            
+            jsr SETADDR        ;Move the cursor off the screen
+            rts
+
+;------------------------------------NEW KP MESSAGE-----------------------------------
+pKP:     tst COUNT
+         bne exit_pKP
+         tst FIRSTCHAR         ;Test if FIRSTCHAR is zero
+         bne e_KP              ;If not equal to zero, branch to label for putchar_1st
+         jsr putchar           ;If equal to zero, place next character
+         ldab FIRSTCHAR        ;Load Accumulator B with FIRSTCHAR
+         cmpb DKP              ;Compare DKP to FIRSTCHAR
+         beq e_FKP             ;If both equal 1, branch to clear DKP
+         rts  
+        
+exit_pKP:rts
+
+e_KP:    movw #KP_MESS,DPTR    ;Move address of KP_MESS message into DPTR
+         ldx DPTR              ;Load Register X with DPTR
+         ldaa #$40             ;Load Accumulator A with Address of first LCD
+         jsr putchar_1st       ;Place the first character
+         rts
+
+e_FKP:   clr DKP               ;Clear DKP flag to stop printing message
+         clr COUNT             ;Clear COUNT when done printing
+         clrw DPTR             ;Clear DPTR for new address to be loaded
+         tst D_T               ;Test D_T to see if a wave has been loaded
+         beq exit_FKP
+         ldaa #$48
+         staa RETURNADD        ;Store A into Return address to prevent the cursor moving
+         jsr SETADDR           ;Set the address of the cursor
+         jsr CURSOR_ON         ;Make the cursor visible
+         rts  
+
+exit_FKP:clr DKP               ;Clear the DKP flag
+         ldaa #$30            
+         jsr SETADDR           ;Move the cursor off the screen
+         rts
+
+;-------------------------------------NEW KI MESSAGE------------------------------------
+pKI:     tst COUNT
+         bne exit_pKI
+         tst FIRSTCHAR         ;Test if FIRSTCHAR is zero
+         bne e_KI              ;If not equal to zero, branch to label for putchar_1st
+         jsr putchar           ;If equal to zero, place next character
+         ldab FIRSTCHAR        ;Load Accumulator B with FIRSTCHAR
+         cmpb DKI              ;Compare DKI to FIRSTCHAR
+         beq e_FKI             ;If both equal 1, branch to clear DKI
+         rts  
+        
+exit_pKI:rts
+
+e_KI:    movw #KI_MESS,DPTR    ;Move address of KI_MESS message into DPTR
+         ldx DPTR              ;Load Register X with DPTR
+         ldaa #$4E             ;Load Accumulator A with Address of first LCD
+         jsr putchar_1st       ;Place the first character
+         rts
+
+e_FKI:   clr DKI               ;Clear DKI flag to stop printing message
+         clr COUNT             ;Clear COUNT when done printing
+         clrw DPTR             ;Clear DPTR for new address to be loaded
+         tst D_T               ;Test D_T to see if a wave has been loaded
+         beq exit_FKP
+         ldaa #$56
+         staa RETURNADD        ;Store A into Return address to prevent the cursor moving
+         jsr SETADDR           ;Set the address of the cursor
+         jsr CURSOR_ON         ;Make the cursor visible
+         rts  
+
+exit_FKI:clr DKI               ;Clear the DKI flag
+         ldaa #$30            
+         jsr SETADDR           ;Move the cursor off the screen
+         rts
+                                   
+;-----------------------RUN and STOP MESSAGES-------------------------------------------
+pSTOP:  tst FIRSTCHAR          ;Test if FIRSTCHAR is zero
+        bne e_STOP             ;If not, branch to print first character
+        jsr putchar            ;If true, print next character in flash
+        ldab FIRSTCHAR         ;Load Accumulator B with FIRSTCHAR
+        cmpb DSTOP             ;Compare FIRSTCHAR boolean with DSTOP message flag
+        beq e_FSTOP            ;If both equal 1, branch to final label
+        rts
+e_STOP: movw #STP_MESS, DPTR   ;Load DPTR with Stop Message address
+        ldx DPTR               ;Load Register X with DPTR
+        ldaa #$5C              ;Load A with LCD address for the 1st character
+        jsr putchar_1st
+        rts
+e_FSTOP:clr DSTOP              ;Clear DSTOP message flag
+        tst DONOFF             ;Test transition flags
+        bne STOP_RA 
+        tst DOFFON
+        bne STOP_RA 
+        ldaa #$30              ;Load Accumulator A with $30 to push cursor off screen
+        jsr SETADDR
+        rts
+STOP_RA:ldaa RETURNADD
+        jsr SETADDR
+        rts
+
+pRUN:   tst FIRSTCHAR          ;Test if FIRSTCHAR is zero
+        bne e_RUN              ;If not, branch to print first character
+        jsr putchar            ;If true, print next character in flash
+        ldab FIRSTCHAR         ;Load Accumulator B with FIRSTCHAR
+        cmpb DRUN              ;Compare FIRSTCHAR boolean with DRUN message flag
+        beq e_FRUN             ;If both equal 1, branch to final label
+        rts
+e_RUN:  movw #RUN_MESS, DPTR   ;Load DPTR with RUN Message address
+        ldx DPTR               ;Load Register X with DPTR
+        ldaa #$5C              ;Load Accumulator A with LCD address for the 1st character
+        jsr putchar_1st
+        rts
+e_FRUN: clr DRUN               ;Clear DRUN message flag
+        tst DONOFF             ;Test transition flags
+        bne RUN_RA 
+        tst DOFFON
+        bne RUN_RA 
+        ldaa #$30              ;Load Accumulator A with $30 to push cursor off screen
+        jsr SETADDR
+        rts
+RUN_RA: ldaa RETURNADD
+        jsr SETADDR
+        rts
+
+        
+;OL and CL MESSAGES 
+pOL:   tst FIRSTCHAR           ;Test if FIRSTCHAR is zero
+       bne e_OL                ;If not, branch to print first character
+       jsr putchar             ;If true, print next character in flash
+       ldab FIRSTCHAR          ;Load Accumulator B with FIRSTCHAR
+       cmpb DOL                ;Compare FIRSTCHAR boolean with DOL message flag
+       beq e_FOL               ;If both equal 1, branch to final label
+       rts
+e_OL:  movw #OL_MESS, DPTR     ;Load DPTR with OL Message address
+       ldx DPTR                ;Load Register X with DPTR
+       ldaa #$60               ;Load Accumulator A with LCD address for the 1st character
+       jsr putchar_1st
+       rts
+e_FOL: clr DOL                 ;Clear DOL message flag
+       tst DONOFF              ;Test transition flags
+       bne OL_RA 
+       tst DOFFON
+       bne OL_RA 
+       ldaa #$30               ;Load Accumulator A with $30 to push cursor off screen
+       jsr SETADDR
+       rts
+OL_RA: ldaa RETURNADD
+       jsr SETADDR
+       rts      
+       
+pCL:   tst FIRSTCHAR           ;Test if FIRSTCHAR is zero
+       bne e_CL                ;If not, branch to print first character
+       jsr putchar             ;If true, print next character in flash
+       ldab FIRSTCHAR          ;Load Accumulator B with FIRSTCHAR
+       cmpb DCL                ;Compare FIRSTCHAR boolean with DCL message flag
+       beq e_FCL               ;If both equal 1, branch to final label
+       rts
+e_CL:  movw #CL_MESS, DPTR     ;Load DPTR with CL Message address
+       ldx DPTR                ;Load Register X with DPTR
+       ldaa #$60               ;Load Accumulator A with LCD address for the 1st character
+       jsr putchar_1st
+       rts
+e_FCL: clr DCL                 ;Clear DCL message flag
+       tst DONOFF              ;Test transition flags
+       bne CL_RA 
+       tst DOFFON
+       bne CL_RA 
+       ldaa #$30               ;Load Accumulator A with $30 to push cursor off screen
+       jsr SETADDR
+       rts
+CL_RA: ldaa RETURNADD
+       jsr SETADDR
+       rts       
+       
+;D_ON and D_OFF MESSAGES
+pD_OFF:  tst FIRSTCHAR         ;Test if FIRSTCHAR is zero
+         bne e_D_OFF           ;If not, branch to print first character
+         jsr putchar           ;If true, print next character in flash
+         ldab FIRSTCHAR        ;Load Accumulator B with FIRSTCHAR
+         cmpb DOFF             ;Compare FIRSTCHAR boolean with DOFF message flag
+         beq e_FD_OFF          ;If both equal 1, branch to final label
+         rts
+e_D_OFF: movw #DOFF_MESS, DPTR ;Load DPTR with DOFF Message address
+         ldx DPTR              ;Load Register X with DPTR
+         ldaa #$63             ;Load Accumulator A with LCD address for the 1st character
+         jsr putchar_1st
+         rts
+e_FD_OFF:clr DOFF              ;Clear DOFF message flag
+         tst DONOFF            ;Test transition flags
+         bne D_OFF_RA 
+         tst DOFFON
+         bne D_OFF_RA
+         tst D_T               ;Test input trigger
+         bne D_OFF_RA
+         ldaa #$30             ;Load Accumulator A with $30 to push cursor off screen
+         jsr SETADDR  
+         rts
+D_OFF_RA:ldaa RETURNADD
+         jsr SETADDR
+         rts  
+       
+pD_ON:   tst FIRSTCHAR         ;Test if FIRSTCHAR is zero
+         bne e_D_ON            ;If not, branch to print first character
+         jsr putchar           ;If true, print next character in flash
+         ldab FIRSTCHAR        ;Compare FIRSTCHAR boolean with DON message flag
+         cmpb DON              ;If both equal 1, branch to final label
+         beq e_FD_ON
+         rts
+e_D_ON:  movw #DON_MESS, DPTR  ;Load DPTR with DON Message address
+         ldx DPTR              ;Load Register X with DPTR
+         ldaa #$63             ;Load Accumulator A with LCD address for the 1st character
+         jsr putchar_1st
+         rts
+e_FD_ON: clr DON               ;Clear DON message flag
+         tst DONOFF            ;Test transition flags
+         bne D_ON_RA 
+         tst DOFFON
+         bne D_ON_RA
+         tst D_T               ;Test input trigger 
+         bne D_ON_RA
+         ldaa #$30             ;Load Accumulator A with $30 to push cursor off screen
+         jsr SETADDR
+         rts
+D_ON_RA: ldaa RETURNADD
+         jsr SETADDR
+         rts
+;-----------------------Display State 2: ECHO-------------------------------------------  DONE
+    
+LCDstate2:   tst D_T            ;Test if an inpu has already been selected
+             bne  LINE_1        ;Branch if input has been selected
+             bra exit_LCDs2         
+ 
+LINE_1: ldx POINTER             ;Load POINTER into Register X
+        ldab -1,X               ;Load Accumulator B with what is offset the address X is at
+        jsr OUTCHAR             ;Place DIGIT from KEY_BUF onto LCD screen
+        jsr GETADDR
+        staa RETURNADD
+        clr ECHO_FLAG           ;Clear ECHO_FLAG
+        movb #$01,LCDstate      ;Move to LCDstate1 (Hub)
+        rts
+                
+exit_LCDs2: movb #$01, LCDstate   ;Move to LCDstate1 (Hub)
+            clr ECHO_FLAG         ;Clear ECHO_FLAG to acknowledge
+            rts
+            
+;-----------------------Display State 3: BACKSPACE-------------------------------------- DONE
+LCDstate3: tst COUNT             ;Test COUNT if equal to zero    
+           beq nochar            ;If equal, branch for no character routine     
+           tst BS_FLAG           ;Test if BS_FLAG is equal to zero
+           beq exit_LCDs3
+           ldaa #$02             ;Load Accumulator A with $02
+           cmpa BS_FLAG          ;Compare to BS_FLAG
+           beq PrintSpace
+           ldaa #$03             ;Load Accumulator A with $03
+           cmpa BS_FLAG          ;Compare to BS_FLAG
+           beq MoveCursor
+           ldx POINTER           ;If BS_FLAG equals 1, Load POINTER into Register X
+           ldab #$08             ;Load Backspace key into B
+           jsr OUTCHAR           ;Print Backspace to move cursor
+           inc BS_FLAG           ;Increment BS_FLAG
+           rts
+           
+PrintSpace: ldab #$20            ;Place SPACE ascii into B
+            jsr OUTCHAR          ;Print out SPACE       
+            inc BS_FLAG          ;Increment BS_FLAG
+            rts
+
+MoveCursor: ldab #$08            ;Place Backspace ascii into B
+            jsr OUTCHAR          ;Print Backspace to move cursor
+            clr BS_FLAG          ;Clear BS_FLAG since this is its final move
+            dec COUNT            ;Decrement COUNT
+            decw POINTER         ;Decrement POINTER to previous KEY_BUF address
+            dec RETURNADD
+            ldaa RETURNADD
+            jsr SETADDR
+            rts           
+           
+nochar:    clr BS_FLAG           ;Clear BS_FLAG to stop function
+           movb #$01,LCDstate    ;Move to LCDstate1 (Hub)
+           rts
+
+exit_LCDs3: movb #$01, LCDstate  ;Move to LCDstate1 (Hub)
+            rts
+            
+
+;---------------------------------------------------------------------------------------                                    
+;--------------------------------Keypad-------------------------------------------------
+;---------------------------------------------------------------------------------------
+; This subroutine is responsble for grabbing and storing a keystoke
+                           
+KEYPAD:  ldaa KPstate                
+         beq  KPstate0                ;Initialization state of KEYPAD
+         deca
+         beq  KPstate1                ;KEYPAD hub State
+         deca
+         beq  KPstate2                ;Waits for acknowledgement
+         rts
+;-----------------------Keypad State 0: Initial----------------------------------------         
+                                       
+KPstate0: clr KEY_FLAG               ;clear KEY_FLAG
+          clr TEMP                   ;clear TEMP initially
+          movb #$01, KPstate
+          rts
+;-----------------------Keypad State 1: HUB--------------------------------------------    
+
+KPstate1: tst LKEY_FLG               ;Tests if a cahracter has been grabbed by the keypad
+          beq SKIP                   ;Branch if LKEY_FLG is zero
+          jsr GETCHAR                ;Grabs character from Keypad
+          stab TEMP;                 ;Stores into TEMP for storage
+          movb #$01, KEY_FLAG        ;Move $01 into KEY_FLAG  
+          movb #$02, KPstate         ;Move $02 into KPstate to move to KPstate2
+          rts                           
+
+KPstate2:                            ;Wait for acknowlegdement, Flag may be necessary
+          tst KEY_FLAG               ;Test KEY_FLAG
+          bne SKIP                   ;If not acknowledged (KEY_FLAG = 1), branch to SKIP
+          movb #$01, KPstate         ;Move $01 into KPstate to 
+          rts
+          
+SKIP:     movb #$01, KPstate
+          rts        
+        
+;---------------------------------------------------------------------------------------                                    
+;--------------------------------MOTOR--------------------------------------------------
+;---------------------------------------------------------------------------------------        
+; This subroutine safely initalizes the motor and is responsible for turning it on and off
+       
+MOTOR:       ldaa MOTORstate         ;Initialization state of MOTOR  
+             beq  MOTORstate0              
+             deca
+             beq  MOTORstate1
+             deca
+             beq  MOTORstate2
+             rts 
+;------------------------------------MOTORstate0---------------------------------------
+
+MOTORstate0:                          ;Initialize
+
+             movw #20000, INTERVAL     ; stores the number of clocks in 0.2ms in INTERVAL    
+             bset TIOS, %00000001     ; set channel zero for output compare
+             bset TCTL2,%00000001     ; OM0 to false, OL0 to true, Toggle
+             bset TFLG1,%00000001     ; clear timer channel 0 timer output flag 
+             bset TMSK1,%00000001     ; set channel zero to generate interrupts
+             cli                      ; clears the I mask bit
+      
+ 
+      
+             bset TSCR, %10100000     ; start the timer and enable it to stop during freeze mode
+             
+             ldd  TCNT                ; load accum D with the current timer count 
+             addd INTERVAL            ; add interval to timer count
+             std  TC0                 ; store the sum into TC0         
+             movb #$01,MOTORstate
+             
+             jsr ENABLE_MOTOR
+             
+             
+             rts
+
+;------------------------------------MOTORstate1---------------------------------------
+
+
+MOTORstate1:                         ;Motor off
+        
+             tst RUN                 ;Test if RUN is zero
+             bne MOTORexit1          ;If RUN is not zero branch to MOTORstate2
+             
+             clr A_STAR              ;Clear A_STAR
+             ldd A_STAR              ;Load accumulator D with zero
+             jsr UPDATE_MOTOR        ;Update motor to so its off
+                                              
+             rts
+
+
+MOTORexit1:  
+             movb #$02,MOTORstate
+             rts
+
+;------------------------------------MOTORstate2---------------------------------------
+
+MOTORstate2:                         ;turns the motor on 
+       
+             tst RUN                 ;Test if RUN is zero
+             beq MOTORexit2          ;If zero go to MOTORexit2
+             
+             ldd A_STAR              ;Load accumulator D with in A_STAR
+             jsr UPDATE_MOTOR        ;Update motor with value in D
+             
+             rts
+              
+MOTORexit2:
+             movb #$01, MOTORstate          
+             rts
+        
+;/------------------------------------------------------------------------------------\
+;| Subroutines                                                                        |
+;\------------------------------------------------------------------------------------/
+; General purpose subroutines go here
+
+putchar_1st:
+             stx DPTR          ; Store contents of Register X into DPTR
+             jsr SETADDR       ; Use what is in Accumulator A to set address
+             clr FIRSTCHAR     ; Clear FIRSTCHAR and drop down
+
+putchar:
+             ldx  DPTR         ; Store contents of Register X into DPTR
+             ldab 0,x          ; Load Accum B what address DPTR holds
+             beq  exit_pc      ; If ASCII null, branch
+             jsr  OUTCHAR      ; Place character on LCD
+             incw DPTR         ; Increment DPTR
+             rts
+             
+exit_pc: movb #$01, FIRSTCHAR  ; Move bit to initiate FIRSTCHAR
+         ldaa RETURNADD        ; Load A with previous address
+         jsr  SETADDR
+         rts 
+
+INTERRUPT:
+
+        tst    RUN             ; test run
+        beq    GEN_INT         ; branch to interupt 
+        dec    CINT            ; decrement number of interupts remaining
+        bne    GEN_INT         ; branch to interupt
+        ldd    VALUE           ; load contents of VALUE into d
+        jsr    OUTDACA                                              
+        movb   NINT, CINT      ; reset CINT for next segment
+        movb   #$01, NEWBTI    ; give ok to display
+
+GEN_INT:
+          ldd  TC0             ; read current timer counter
+          addd INTERVAL        ; add interval to timer counter
+          std  TC0             ; store result of addition into TCO
+          bset TFLG1,%00000001 ; clear timer channel 0 timer output flag 
+          rti
+          
+; Conversion from ASCII to BIN for all    ------------------------------------------------    
+              
+BUFF: clrw RESULT              ; clears RESULT
+      movw #KEY_BUF, POINTER   ; moves the address of buffer into POINTER
+        
+LOOP: 
+          
+      ldd   RESULT             ; loads d with the contents of RESULT 
+      ldy   #10                ; loads y with the decimal equivalent of 10
+      emul                     ; multiplies d with y
+     
+      tsty                     ;test for carry 
+      beq CLOOP
+      ldd #$7FFF
+      std RESULT               ; stores the contents of d with results of emul 
+      dec COUNT
+      rts
+                              
+CLOOP:std RESULT
+      ldx POINTER              ; load x with the contents of POINTER 
+      ldab 0,X                 ; load b with the contents of POINTER offset by 0 
+      subb #$30                ; shake or subtract 30 hex from b
+      ldaa #$FD
+      cba 
+      beq negskip
+      ldaa #$FB
+      cba
+      beq posskip
+      
+      clra                     ; clear a
+      addd RESULT              ; add the next BCD 
+      std  RESULT              ; store result
+      
+      incw POINTER             ; move to next ASCII digit
+      dec COUNT                ; decrement count by 1
+      bne LOOP                 ; loop if not equal to zero
+                         
+      ldd RESULT               ; Load RESULT again into Accumulator D
+      cpd #$0000               ; Compare to 0 decimal
+      beq ZERO                 ; branch if equal to zero
+           
+      rts                      ; return to main
+         
+ZERO:ldd #$0000
+     std RESULT
+     rts  
+     
+negskip:incw POINTER          ;Increment pointer
+        dec  COUNT            ;Decrement count
+        movb #$01, NEGFLAG    ;Move bit into negative flag
+        bra LOOP
+
+posskip:clr NEGFLAG           ;Clear negative flag
+        incw POINTER          ;Increment Pointer
+        dec COUNT             ;Decrement Count
+        bra LOOP     
+; Conversion BIN to ASCII for VREF, VACT and ERROR -------------------------------------------------
+
+BINASC: 
+       
+        ldx #10     ;Load Register X with hex 10
+        idivs       ;Divide D by X, remainder in D
+        
+        tstb        ;Test Accumulator B for negative value
+        bmi NEGBA   ;Branch if negative
+        
+        addb #$30   ;If positive, add to Accumulator B with $30
+
+        clra        ;Clear Accumulator A for transfer between D and X
+        ldaa A_COUNT 
+        stab A,Y    ;Store at an offset from Address pointed by Register Y
+        deca
+        staa A_COUNT
+        
+
+        xgdx        ;Exchange contents of X with D, now the result is in D
+        inc NUM
+        cpd #$0     
+        bne BINASC  ;Fix Branch
+       
+        ldab #$20   ;If final digit and psoitive, load B with ASCII space
+        stab A,Y    ;Store at first address of OUTBUF         
+        ldaa NUM
+        rts     
+          
+      
+NEGBA:  negb        ;If negative, chage to two's complement
+        addb #$30
+        clra        ;Clear Accumulator A for transfer between D and X
+        ldaa A_COUNT 
+        stab A,Y    ;Store at an offset from Address pointed by Register Y 
+        deca
+        staa A_COUNT
+        
+        xgdx        ;Exchange contents of X with D, now the result is in D
+        inc NUM
+        cpd #$0         
+        bne BINASC  ;Fix branch
+       
+        ldab #$2D   ;If final digit and negative, load B with ASCII minus
+        stab A,Y    ;Store at first address of OUTBUF        
+        ldaa NUM
+        rts
+;Coonversion BIN to ASCII for KP, KI and EFFORT --------------------------------------------  
+BINASC2:
+        ldx #10     ;Load Register X with hex 10
+        idivs       ;Divide D by X, remainder in D
+        
+        addb #$30   ;If positive, add to Accumulator B with $30
+
+        clra        ;Clear Accumulator A for transfer between D and X
+        ldaa A_COUNT
+        stab A,Y    ;Store at an offset from Address pointed by Register Y
+        deca
+        staa A_COUNT
+
+        xgdx        ;Exchange contents of X with D, now the result is in D
+        inc NUM
+        cpd #$0     
+        bne BINASC2  ;Fix Branch
+                  
+        ldaa NUM
+        rts 
+
+      
+;-----------------------------------------------------------------------------------------------;
+;-----------------------------------------MOTOR ISR---------------------------------------------;
+;-----------------------------------------------------------------------------------------------;
+; This interrupt service routine is responsible for all motor logic and occurs every 2 milliseconds
+; It reads the encoder, calculates the % error, undergoes multiple saturation checks, updates the display etc 
+
+MOTOR_ISR:                     ;Calculate Vact for OL & CL
+        
+       	jsr  READ_ENCODER      ;read the encoder and store into D
+       	
+        std  THETA_NEW         ;store encoder reading into theta_new
+        ldx  THETA_NEW         ;load X register with theta_new
+        subx THETA_OLD         ;subtract theta_new with theta_old
+        stx  V_ACT             ;store X into V_ACT
+        std  THETA_OLD         ;load theta_old for the next pass
+
+        tst  RUN               ;test if motor is running
+        lbeq MOTOR_OFF         ;branch if motor is off
+
+         
+        ldy  V_REF             ;Calculate error and store in ERROR
+        tst CL
+        beq OPEN_LOOP_ERROR    ;Calculate error for open loop
+        
+        
+        suby V_ACT
+        sty  ERROR             ;add ERROR with E_SUM, saturate addition here?
+        cpy  #999              ;Compare Y for overflow conditions
+        bgt  OVFLOW_E          ;branch if overflow
+        cpy  #-999
+        blt  OVFLOW_E
+        
+        bra  HITCH
+        
+;Create an errorflag (DERROR?) for when the value is above 999 or below -999        
+OPEN_LOOP_ERROR:
+
+        sty ERROR                ;Store error in Y
+        cpy  #999                ;Compare Y for overflow conditions
+        bgt  OVFLOW_E            ;branch if overflow
+        cpy  #-999
+        blt  OVFLOW_E
+        bra HITCH       
+
+OVFLOW_E: movb #$01, OVF_FLAG    ;Move bit into OVF flag
+         
+        
+HITCH:        
+        ldd  E_SUM
+        jsr  SDBA              ;jump to saturated 
+        std  E_SUM
+       
+;-----------------------------------PROPORTIONAL_CONTROL------------------------------------;
+
+PROP_CONTROL:                ;this represents the Kp branch 
+          
+        ldy ERROR
+        ldd KPP           ;load d with Kp*1024
+        ldx #$0400        ;load X with 1024
+        emuls             ;multiply
+        edivs             ;divide by whats it enter        -----
+        bvs  KP_CHECK
+        lbra KP_LOAD  
+;------------------------------------KP_SAT_SIGN_CHECK---------------------------------------------;
+      
+
+KP_CHECK:             ;kp saturation check
+
+        ldy ERROR
+        tsty          ;test X ERROR should be in here
+        bpl KP_POS    ;Branch if e is +
+        ldy #$8000    ;load y with -32,768
+        lbra KP_LOAD  ;
+                
+KP_POS:                     ;KP is positive
+        ldy  #$7FFF   ;load y with 32,767
+        lbra KP_LOAD  
+
+KP_LOAD:
+        sty KP   
+                	
+;------------------------------------INTEGRAL_CONTROL----------------------------------------;
+
+INTEGRAL_CONTROL:   ;this represents the KI branch     
+        
+        
+        tst CL            ;test if we are open loop or closed loop
+        beq OPEN_LOOP
+        
+        
+        ldy E_SUM         ;load
+        ldd KIP           ;load d with Ki*1024
+        ldx #$0400        ;load X with 1024
+        emuls             ;multiply b 
+        edivs             ;divide by X
+        bvs  KI_CHECK
+        lbra KI_LOAD
+        
+ OPEN_LOOP: 
+
+        ldd #$0000
+        std KIP
+        ldy #$0000
+        lbra KI_LOAD
+        
+        
+;------------------------------------KI_SAT_CHECK---------------------------------------------;
+
+
+KI_CHECK:           ;ki saturation check
+        ldy E_SUM
+        tsty        ;test Y ERROR should be in here
+        bpl KI_POS  ;Branch if E_SUM is +
+        ldy #$8000  ;load y with -32,768
+        lbra KI_LOAD
+        
+        
+KI_POS:                     ;KI is positive
+        ldy  #$7FFF   ;load y with 32,767
+        lbra KI_LOAD
+
+KI_LOAD:
+        sty KI  
+       
+;-------------------------------------Kp+KI--------------------------------------------------;
+ ADDITION:
+ 
+         ldd KP               ;load y with KP
+         ldy KI               ;load d with KI
+         jsr SDBA_A_STAR      ;add y and d to find duty cycle
+         std A_STAR
+         ldy #$0064           ;100
+         emuls                ;uncomment these when KI and KP can be changed properly
+         ldx #$0271           ;625
+         edivs
+         xgdy   
+         std EFFORT
+         bra MOTOR_UPDATE
+
+;------------------------------------MOTOR_OFF-------------------------------------------------;       
+MOTOR_OFF:                      ;motor not running clears A* 
+         
+         clrw A_STAR
+         ldd  A_STAR 
+        
+;------------------------------------MOTOR_UPDATE----------------------------------------------; 
+MOTOR_UPDATE: ;update motor
+        
+        jsr UPDATE_MOTOR
+        ldd TC0
+        addd INTERVAL
+        std TC0
+        bset TFLG1, CHAN0
+	
+        tst CINT
+        beq UPDATE_DISPLAY
+        inc CINT
+        bra END
+        
+UPDATE_DISPLAY:
+
+        tst D_ON             ; Test if Display is on or off
+        beq END              ; Exit out of ISR
+        inc DISPCOUNT        ; Increment Display counter,256 = 0.5 seconds roughly
+        bne END              ; Exit out of ISR
+        jsr GETADDR
+        staa RETURNADD                                                       ;---------------------
+        movb   #$01, UD_FLAG ; Update flga triggered for all L buffers
+        
+END:    rti 
+
+;------------------------------------SAT_CHECK-------------------------------------------------;      
+SDBA:
+      
+      pshy                ; pushes contents of y into stack pointer
+      addd   0, SP        ; adds contents of stack pointer to accum. d
+      bvs    OVERFLOW_SDBA  
+      bra    EXIT_SDBA    ; branches to exit to return to main
+
+OVERFLOW_SDBA:
+      
+      tsty                ; testing y for the N flag
+      bmi    NEG_SDBA     ; branches if addend was negative
+      
+      ldd    #$7FFF       ; loads saturated positive number if positive overflow
+      
+      bra    EXIT_SDBA    ; branches to exit to return to main
+      
+NEG_SDBA:
+      ldd    #$8000       ; loads the saturated negative number if negative overflow
+      
+EXIT_SDBA:
+      puly                ; Returns stack to where it was before jsr
+      rts                 ; back to main
+      
+;------------------------------------SAT_CHECK_A_STAR-------------------------------------------;  
+SDBA_A_STAR: ;sat check for a*
+
+      pshy                ; pushes contents of y into stack pointer
+      addd   0,SP
+      cpd    #$0271        ;
+      bgt    OVERFLOW_SDBAA
+      cpd    #$FD8F        ;
+      blt    OVERFLOW_SDBAA
+      bra    EXIT_SDBAA
+      
+ OVERFLOW_SDBAA:
+     tsty
+     bmi NEG_SDBAA
+     ldd #$0271
+     bra EXIT_SDBAA
+
+      
+NEG_SDBAA:
+      ldd    #$FD8F      ; loads -625 if saturated
+      
+EXIT_SDBAA:
+      puly                ; Returns stack to where it was before jsr
+      rts                 ; back to main
+      
+;/------------------------------------------------------------------------------------\
+;| ASCII Messages and Constant Data                                                   |
+;\------------------------------------------------------------------------------------/
+; Any constants can be defined here        
+        
+NEW_VREF   DC.B 'new V_ref=                 ',$00
+KP_MESS    DC.B '1024*KP=     ',$00
+KI_MESS    DC.B '1024*KI=     ',$00
+RUN_MESS   DC.B 'RUN',$00
+STP_MESS   DC.B 'STP',$00
+CL_MESS    DC.B 'CL',$00
+OL_MESS    DC.B 'OL',$00
+DON_MESS   DC.B 'D_ON ',$00
+DOFF_MESS  DC.B 'D_OFF',$00        
+     
+
+;/------------------------------------------------------------------------------------\
+;| Vectors                                                                            |
+;\------------------------------------------------------------------------------------/
+; Add interrupt and reset vectors here
+
+        ORG   $FFFE                    ; reset vector address
+        DC.W  Entry
+        ORG   $FFCE                    ; Key Wakeup interrupt vector address [Port J]
+        DC.W  ISR_KEYPAD
+        ORG   $FFEE                    ; Vector Address for interupt service routine
+        DC.W  MOTOR_ISR
